@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "cap.name" (dict "root" . "component" "api-wait") }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "cap.name" (dict "root" . "component" "api-wait") }}
+rules:
+  - apiGroups: [batch]
+    resources: [jobs]
+    resourceNames: [{{ include "cap.job" . | quote }}]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "cap.name" (dict "root" . "component" "api-wait") }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "cap.name" (dict "root" . "component" "api-wait") }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "cap.name" (dict "root" . "component" "api-wait") }}

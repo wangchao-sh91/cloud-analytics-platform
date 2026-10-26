@@ -1,0 +1,8 @@
+Lab Inventory is ready when all workloads and the migration Job are complete.
+
+Local access (keep this terminal open):
+  kubectl --context <your-context> -n {{ .Release.Namespace }} port-forward --address 127.0.0.1 svc/{{ include "cap.name" (dict "root" . "component" "frontend") }} 8080:80
+
+Open http://127.0.0.1:8080
+Uninstall retains the database PVC and credentials. Reinstall with the same release,
+namespace, naming mode and database configuration to reuse your assets.

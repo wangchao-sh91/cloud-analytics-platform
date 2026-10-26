@@ -1,0 +1,3 @@
+# Only use after explicit legacy resource preflight and adoption.
+naming:
+  mode: legacy

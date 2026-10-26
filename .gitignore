@@ -218,3 +218,13 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Frontend and local verification artifacts
+node_modules/
+playwright-report/
+test-results/
+*.tsbuildinfo
+backups/
+
+# Locally installed deployment tools
+.tools/

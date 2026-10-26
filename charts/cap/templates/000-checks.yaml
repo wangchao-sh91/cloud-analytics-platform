@@ -1,0 +1,36 @@
+{{- $secretName := include "cap.name" (dict "root" . "component" "db-secret") -}}
+{{- $dbName := include "cap.name" (dict "root" . "component" "postgres") -}}
+{{- $secret := lookup "v1" "Secret" .Release.Namespace $secretName -}}
+{{- $pvc := lookup "v1" "PersistentVolumeClaim" .Release.Namespace (printf "data-%s-0" $dbName) -}}
+{{- if and $pvc (not $secret) -}}
+{{- fail "Retained database PVC exists but its Secret is missing. Restore the original credentials before deployment." -}}
+{{- end -}}
+{{- range (lookup "v1" "Secret" .Release.Namespace "").items -}}
+{{- $annotations := .metadata.annotations | default dict -}}
+{{- if and (eq (index $annotations "meta.helm.sh/release-name") $.Release.Name) (eq (index $annotations "meta.helm.sh/release-namespace") $.Release.Namespace) (hasKey $annotations "cap.lab/identity") -}}
+{{- if ne (index $annotations "cap.lab/identity") (include "cap.identity" $) -}}
+{{- fail "Database identity, naming mode and storage settings are immutable. Use a separate migration or expansion procedure." -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if $secret -}}
+{{- $annotations := $secret.metadata.annotations | default dict -}}
+{{- if or (ne (index $annotations "meta.helm.sh/release-name") .Release.Name) (ne (index $annotations "meta.helm.sh/release-namespace") .Release.Namespace) -}}
+{{- fail "Existing database Secret is not owned by this release. Run the explicit adoption procedure first." -}}
+{{- end -}}
+{{- $data := $secret.data | default dict -}}
+{{- if or (not (index $data "POSTGRES_PASSWORD")) (not (index $data "DATABASE_URL")) -}}
+{{- fail "Database Secret is incomplete. Restore its original password and DATABASE_URL." -}}
+{{- end -}}
+{{- $expected := printf "postgresql+psycopg://%s:%s@%s:5432/%s" .Values.database.user (index $data "POSTGRES_PASSWORD" | b64dec | urlquery) $dbName .Values.database.name -}}
+{{- if ne ($expected | b64enc) (index $data "DATABASE_URL") -}}
+{{- fail "Database Secret URL does not match the configured database identity." -}}
+{{- end -}}
+{{- end -}}
+{{- $sts := lookup "apps/v1" "StatefulSet" .Release.Namespace $dbName -}}
+{{- if $sts -}}
+{{- $claim := first $sts.spec.volumeClaimTemplates -}}
+{{- if or (ne ($claim.spec.storageClassName | default "") .Values.database.persistence.storageClass) (ne $claim.spec.resources.requests.storage .Values.database.persistence.size) -}}
+{{- fail "Existing StatefulSet storage settings differ. In-place volume template changes are not supported." -}}
+{{- end -}}
+{{- end -}}
