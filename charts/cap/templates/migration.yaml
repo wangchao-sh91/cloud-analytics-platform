@@ -1,0 +1,29 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "cap.job" . }}
+  labels:
+    {{- include "cap.labels" . | nindent 4 }}
+spec:
+  backoffLimit: {{ .Values.migration.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.migration.deadlineSeconds }}
+  template:
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      initContainers:
+        - name: wait-database
+          image: "{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag }}"
+          imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
+          command: [python, -m, app.wait, database, --timeout, {{ .Values.migration.waitSeconds | quote }}]
+          envFrom:
+            - secretRef:
+                name: {{ include "cap.name" (dict "root" . "component" "db-secret") }}
+      containers:
+        - name: migrate
+          image: "{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag }}"
+          imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
+          command: [alembic, upgrade, head]
+          envFrom:
+            - secretRef:
+                name: {{ include "cap.name" (dict "root" . "component" "db-secret") }}

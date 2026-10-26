@@ -1,0 +1,13 @@
+# kind: build and load both application images before installation.
+frontend:
+  replicas: 1
+  image:
+    pullPolicy: IfNotPresent
+backend:
+  replicas: 1
+  image:
+    pullPolicy: IfNotPresent
+database:
+  persistence:
+    size: 2Gi
+    storageClass: ""

@@ -1,0 +1,7 @@
+apiVersion: v2
+name: cap
+description: Lab Dell PowerEdge physical server inventory
+type: application
+version: 0.2.0
+appVersion: "0.2.0"
+kubeVersion: ">=1.32.0-0"
