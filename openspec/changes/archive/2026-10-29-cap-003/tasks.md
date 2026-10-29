@@ -37,10 +37,10 @@
 
 - [x] 6.1 在 Workflow 拆分及契约测试更新后重跑本地静态检查、隔离数据库后端测试、mock 单元测试、Helm 校验及打包回归，确认既有本地配置和数据保留语义不变。
 - [x] 6.2 分别校验两个 Workflow 的语法、表达式、触发、Job 数量和依赖/权限，确认 PR 六项、main 仅两项且无四个 skipped 检查、无数据库 service；未引入应用安装、集群变更、E2E、Flux 或清理入口。
-- [ ] 6.3 在可用的 GitHub/GHCR 远端条件下，由 collaborator 提交已 bump Chart version 的代码 PR 验收六项检查成功：按发布清单读取两项镜像和 Chart，核对其 SHA、版本、digest 与渲染内容，记录运行链接；未执行时明确保留为待验收。
+- [x] 6.3 在可用的 GitHub/GHCR 远端条件下，由 collaborator 提交已 bump Chart version 的代码 PR 验收六项检查成功：按发布清单读取两项镜像和 Chart，核对其 SHA、版本、digest 与渲染内容，记录运行链接；未执行时明确保留为待验收。
 - [x] 6.4 更新 Workflow 契约和门禁回归：PR 保留未 bump/失败时阻止发布，main 直接执行镜像发布且无 PR 质量门禁依赖，两者镜像失败均阻止 Chart；保留版本、权限与幂等回归，分别记录离线和远端结果。
-- [ ] 6.5 在 main push 后验收仅显示 Build and Publish Images 和 Package and Publish Chart 两个 Job，核对准确 main SHA 的制品及读回结果，确认无额外质量检查 Job、PostgreSQL service 或部署；记录真实运行链接，未具备条件时保留待验收。
+- [x] 6.5 在 main push 后验收仅显示 Build and Publish Images 和 Package and Publish Chart 两个 Job，核对准确 main SHA 的制品及读回结果，确认无额外质量检查 Job、PostgreSQL service 或部署；记录真实运行链接，未具备条件时保留待验收。
 
 ## 验证记录
 
-本地验收与未执行的远端验收分别记录于 `docs/verification/cap-003.md`。本次 main 精简已完成 Workflow、契约测试和文档同步，本地静态检查、隔离测试、Helm 与 actionlint 验证通过。任务 6.3、6.5 仍等待实际 GitHub PR/main 运行及 GHCR 发布读回，不以模拟结果替代。
+本地验收与维护者人工远端验收分别记录于 `docs/verification/cap-003.md`。本次 main 精简已完成 Workflow、契约测试和文档同步，本地静态检查、隔离测试、Helm 与 actionlint 验证通过。维护者已在本次会话确认任务 6.3、6.5 人工验证完成并勾选；远端结果依据维护者确认记录，未由本地代理执行，运行链接尚未附入记录。
