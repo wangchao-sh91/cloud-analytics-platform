@@ -1,0 +1,92 @@
+name: Publish Main
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_SHA: ${{ github.sha }}
+  UV_NO_PROGRESS: '1'
+  KUBECONFIG: /dev/null
+
+jobs:
+  images:
+    name: Build and Publish Images
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      group: publish-images-${{ github.sha }}
+      cancel-in-progress: false
+    outputs:
+      backend_digest: ${{ steps.publish.outputs.backend_digest }}
+      frontend_digest: ${{ steps.publish.outputs.frontend_digest }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install uv==0.12.1
+      - run: uv sync --project apps/backend --frozen
+      - run: uv run --project apps/backend --frozen python scripts/ci_release.py metadata
+      - name: Build or verify and reuse commit images
+        id: publish
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: uv run --project apps/backend --frozen python scripts/ci_release.py images
+      - name: Failure summary
+        if: ${{ failure() }}
+        run: echo 'Image publication failed or was blocked. No complete release was published.' >> "$GITHUB_STEP_SUMMARY"
+
+  chart:
+    name: Package and Publish Chart
+    needs: [images]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      group: publish-chart-${{ github.sha }}
+      cancel-in-progress: false
+    steps:
+      - name: Require complete image publication
+        env:
+          IMAGE_RESULT: ${{ needs.images.result }}
+        run: test "$IMAGE_RESULT" = success
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install uv==0.12.1
+      - run: uv sync --project apps/backend --frozen
+      - run: bash scripts/install-helm.sh
+      - run: uv run --project apps/backend --frozen python scripts/ci_release.py metadata
+      - name: Package or verify and reuse Chart, then read back
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BACKEND_DIGEST: ${{ needs.images.outputs.backend_digest }}
+          FRONTEND_DIGEST: ${{ needs.images.outputs.frontend_digest }}
+        run: uv run --project apps/backend --frozen python scripts/ci_release.py chart
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: release-${{ env.SOURCE_SHA }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .tools/release/release.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+      - name: Failure summary
+        if: ${{ failure() }}
+        run: echo 'Chart publication failed or was blocked. See job logs; no successful release artifact was uploaded.' >> "$GITHUB_STEP_SUMMARY"

@@ -78,7 +78,7 @@
 
 ### Requirement: GHCR 应用镜像发布
 
-在质量检查通过后，系统 SHALL 使用本次 SHA 的前后端 Dockerfile 构建 linux/amd64 镜像，分别推送到仓库 owner 下的 GHCR Package。镜像 tag SHALL 等于完整源 commit SHA，不添加 PR/main 前缀、run ID 或 attempt，且 SHALL 记录实际 digest；一个应用构建或推送失败 SHALL 导致检查失败且阻止 Chart 发布。系统 SHALL 不自动改变 Package 可见性。
+PR 在四项质量门禁通过后、main 在对应 push 触发后，系统 SHALL 使用本次准确 SHA 的前后端 Dockerfile 构建 linux/amd64 镜像，分别推送到仓库 owner 下的 GHCR Package。main 发布 SHALL 不依赖四项 PR 质量门禁 Job。镜像 tag SHALL 等于完整源 commit SHA，不添加 PR/main 前缀、run ID 或 attempt，且 SHALL 记录实际 digest；一个应用构建或推送失败 SHALL 导致检查失败且阻止 Chart 发布。系统 SHALL 不自动改变 Package 可见性。
 
 #### Scenario: 前后端镜像发布
 - **WHEN** PR 或 main 运行完成两项镜像推送
@@ -110,15 +110,19 @@
 
 ### Requirement: main 自动发布
 
-系统 SHALL 在 main 分支 push 时对该次 push 的准确 SHA 执行质量检查，并自动构建、发布前后端镜像和 OCI Chart。镜像 tag SHALL 等于该 main SHA，Chart 发布版本 SHALL 为该提交 `Chart.yaml` 的 version 加 `-sha<main SHA>`。PR 合并后的发布 SHALL 使用 main 上实际产生的提交 SHA，不再额外要求在 main 发布作业中修改版本，也不得将合并前 PR 的镜像冒充合并后提交的构建结果；PR 阶段的 base/head bump 比较 SHALL 不在 main 作业中错误重做。
+系统 SHALL 在 main 分支 push 时仅产生 `Build and Publish Images` 和 `Package and Publish Chart` 两个 Job，按镜像发布成功后再发布 Chart 的顺序执行。main Workflow SHALL 不定义静态检查、代码测试、Helm 校验或 Chart 版本提升检查 Job，也不将它们作为 skipped Job 展示。镜像 tag SHALL 等于该次 push 的准确 main SHA，Chart 发布版本 SHALL 为该提交 `Chart.yaml` 的 version 加 `-sha<main SHA>`。PR 合并后的发布 SHALL 使用 main 上实际产生的提交 SHA，不再额外要求在 main 发布作业中修改版本，也不得将合并前 PR 的镜像冒充合并后提交的构建结果。发布 Job 内必要的源码身份、版本格式、镜像一致性、Chart 打包及读回验收 SHALL 保留，不能以 main 不执行独立质量检查为由跳过制品验收。
 
 #### Scenario: 合并 PR
 - **WHEN** PR 合并产生 main push
-- **THEN** 系统为 main 上该次提交重新构建并发布一套可追溯制品，不部署到任何环境
+- **THEN** main 运行仅显示两个发布 Job，为 main 上该次提交构建或复用同源镜像并发布对应 Chart，不重复执行 PR 质量检查，不部署到任何环境
 
-#### Scenario: main 检查失败
-- **WHEN** main 发布的任一质量门禁失败
-- **THEN** 运行失败且不发布完整 Chart，不连接集群尝试补偿或部署
+#### Scenario: main 镜像发布失败
+- **WHEN** main 的镜像构建、来源校验或推送失败
+- **THEN** 镜像 Job 失败，Chart Job 明确失败且不发布 Chart，不连接集群尝试补偿或部署
+
+#### Scenario: main 制品验收失败
+- **WHEN** main 的 Chart 打包、版本解析、镜像一致性或读回验收失败
+- **THEN** Chart Job 失败且不输出成功发布清单，不额外启动独立的质量检查 Job
 
 ### Requirement: 发布权限与仓库协作者边界
 

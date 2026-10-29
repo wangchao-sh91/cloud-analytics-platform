@@ -2,7 +2,6 @@ import copy
 import io
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
 import tarfile
@@ -272,26 +271,46 @@ def test_chart_layer_readback_checks_identity_then_renders(data, tmp_path, monke
         registry.chart(wrong, tmp_path)
 
 
-def test_workflow_contract_and_permissions():
-    workflow = yaml.load((Path(__file__).resolve().parents[2] / '.github/workflows/ci.yaml').read_text(), Loader=yaml.BaseLoader)
-    assert set(workflow['on']) == {'pull_request', 'push'}
+def workflow_config(filename):
+    return yaml.load((release.ROOT / '.github/workflows' / filename).read_text(), Loader=yaml.BaseLoader)
+
+
+@pytest.mark.parametrize('filename,event', [('ci.yaml', 'pull_request'), ('publish-main.yaml', 'push')])
+def test_workflow_contract_and_permissions(filename, event):
+    workflow = workflow_config(filename)
+    assert set(workflow['on']) == {event}
+    assert workflow['on'][event]['branches'] == ['main']
     assert workflow['permissions'] == {'contents': 'read'}
     jobs = workflow['jobs']
-    assert {job['name'] for job in jobs.values()} == {
-        'Static Checks', 'Code Tests', 'Build and Publish Images', 'Helm Validation',
-        'Package and Publish Chart', 'Chart Version Check',
-    }
-    assert set(jobs['images']['needs']) == {'static-checks', 'code-tests', 'helm-validation', 'chart-version'}
+    names = {'Build and Publish Images', 'Package and Publish Chart'}
+    if event == 'pull_request':
+        names |= {'Static Checks', 'Code Tests', 'Helm Validation', 'Chart Version Check'}
+        assert len(jobs) == 6
+        assert set(jobs['images']['needs']) == {'static-checks', 'code-tests', 'helm-validation', 'chart-version'}
+        assert jobs['images']['if'] == '${{ always() }}'
+        assert workflow['env']['SOURCE_SHA'] == '${{ github.event.pull_request.head.sha }}'
+    else:
+        assert len(jobs) == 2
+        assert 'needs' not in jobs['images'] and 'if' not in jobs['images']
+        assert workflow['env']['SOURCE_SHA'] == '${{ github.sha }}'
+        for job in jobs.values():
+            assert 'services' not in job
+            commands = '\n'.join(step.get('run', '') for step in job['steps'])
+            for forbidden in ('check-quality.sh', 'check_code.py', 'check-helm.sh', 'check_chart_version.py', 'pytest', 'GATE_RESULTS'):
+                assert forbidden not in commands
+    assert {job['name'] for job in jobs.values()} == names
     assert jobs['chart']['needs'] == ['images']
+    assert jobs['chart']['if'] == '${{ always() }}'
     for name, job in jobs.items():
         if name in ('images', 'chart'):
-            assert job['if'] == '${{ always() }}'
             assert job['permissions'] == {'contents': 'read', 'packages': 'write'}
         else:
             assert 'permissions' not in job
         for step in job['steps']:
             if 'uses' in step:
                 assert release.SHA.fullmatch(step['uses'].split('@')[1])
+                if step['uses'].startswith('actions/checkout@'):
+                    assert step['with']['ref'] == '${{ env.SOURCE_SHA }}'
 
 
 @pytest.mark.parametrize('results,expected', [
@@ -302,9 +321,34 @@ def test_workflow_contract_and_permissions():
     ([], 1),
 ])
 def test_actual_workflow_gate_blocks_failure_skipped_and_cancelled(results, expected):
-    workflow = yaml.load((release.ROOT / '.github/workflows/ci.yaml').read_text(), Loader=yaml.BaseLoader)
+    workflow = workflow_config('ci.yaml')
     gate = workflow['jobs']['images']['steps'][0]['run'].splitlines()
     assert gate[0] == "python - <<'PY'" and gate[-1] == 'PY'
     result = subprocess.run([sys.executable, '-c', '\n'.join(gate[1:-1])],
                             env=dict(os.environ, GATE_RESULTS=json.dumps(results)), capture_output=True)
     assert result.returncode == expected
+
+
+@pytest.mark.parametrize('filename', ['ci.yaml', 'publish-main.yaml'])
+@pytest.mark.parametrize('result', ['success', 'failure', 'skipped', 'cancelled'])
+def test_both_chart_jobs_require_successful_images(filename, result):
+    workflow = workflow_config(filename)
+    gate = workflow['jobs']['chart']['steps'][0]
+    assert gate['env']['IMAGE_RESULT'] == '${{ needs.images.result }}'
+    actual = subprocess.run(['bash', '-c', gate['run']],
+                            env=dict(os.environ, IMAGE_RESULT=result), capture_output=True)
+    assert actual.returncode == (0 if result == 'success' else 1)
+
+
+def test_pr_and_main_share_publishing_commands_and_digest_handoff():
+    pr = workflow_config('ci.yaml')['jobs']
+    main = workflow_config('publish-main.yaml')['jobs']
+    for name in ('images', 'chart'):
+        def publish_commands(job):
+            return [step['run'] for step in job['steps'] if 'ci_release.py' in step.get('run', '')]
+        assert publish_commands(pr[name]) == publish_commands(main[name])
+        assert 'github.event.pull_request' not in main[name]['concurrency']['group']
+        for workflow in (pr, main):
+            publish = next(step for step in workflow['chart']['steps'] if step.get('run', '').endswith('ci_release.py chart'))
+            assert publish['env']['BACKEND_DIGEST'] == '${{ needs.images.outputs.backend_digest }}'
+            assert publish['env']['FRONTEND_DIGEST'] == '${{ needs.images.outputs.frontend_digest }}'
