@@ -1,0 +1,206 @@
+name: CI and Publish
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+  UV_NO_PROGRESS: '1'
+  KUBECONFIG: /dev/null
+
+jobs:
+  static-checks:
+    name: Static Checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: apps/frontend/package-lock.json
+      - run: python -m pip install uv==0.12.1
+      - run: uv sync --project apps/backend --frozen
+      - run: npm --prefix apps/frontend ci
+      - run: bash scripts/check-quality.sh
+
+  code-tests:
+    name: Code Tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: cap_test
+          POSTGRES_DB: cap_test
+          # Only the disposable service on this runner's loopback uses trust.
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - '127.0.0.1:5432:5432'
+        options: >-
+          --health-cmd "pg_isready -U cap_test -d cap_test"
+          --health-interval 5s --health-timeout 3s --health-retries 12
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install uv==0.12.1
+      - run: uv sync --project apps/backend --frozen
+      - name: Unit tests without database credentials
+        run: uv run --project apps/backend --frozen python scripts/check_code.py unit
+      - name: Backend integration tests on disposable PostgreSQL
+        env:
+          TEST_DATABASE_URL: postgresql+psycopg://cap_test@127.0.0.1:5432/cap_test
+        run: uv run --project apps/backend --frozen python scripts/check_code.py backend
+
+  helm-validation:
+    name: Helm Validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install uv==0.12.1
+      - run: uv sync --project apps/backend --frozen
+      - run: bash scripts/install-helm.sh
+      - run: bash scripts/check-helm.sh
+
+  chart-version:
+    name: Chart Version Check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install uv==0.12.1
+      - run: uv sync --project apps/backend --frozen
+      - name: Require a Chart bump for code changes
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: >-
+          uv run --project apps/backend --frozen python scripts/check_chart_version.py
+          --event "$GITHUB_EVENT_NAME" --head "$SOURCE_SHA" --base "$PR_BASE_SHA"
+
+  images:
+    name: Build and Publish Images
+    needs: [static-checks, code-tests, helm-validation, chart-version]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      group: publish-images-${{ github.event.pull_request.head.sha || github.sha }}
+      cancel-in-progress: false
+    outputs:
+      backend_digest: ${{ steps.publish.outputs.backend_digest }}
+      frontend_digest: ${{ steps.publish.outputs.frontend_digest }}
+    steps:
+      - name: Require all quality gates
+        env:
+          GATE_RESULTS: ${{ toJSON(needs.*.result) }}
+        run: |
+          python - <<'PY'
+          import json, os, sys
+          results = json.loads(os.environ['GATE_RESULTS'])
+          if len(results) != 4 or any(result != 'success' for result in results):
+              sys.exit('Quality gates did not pass; no images or Chart will be published.')
+          PY
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install uv==0.12.1
+      - run: uv sync --project apps/backend --frozen
+      - run: uv run --project apps/backend --frozen python scripts/ci_release.py metadata
+      - name: Build or verify and reuse commit images
+        id: publish
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: uv run --project apps/backend --frozen python scripts/ci_release.py images
+      - name: Failure summary
+        if: ${{ failure() }}
+        run: echo 'Image publication failed or was blocked. No complete release was published.' >> "$GITHUB_STEP_SUMMARY"
+
+  chart:
+    name: Package and Publish Chart
+    needs: [images]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      group: publish-chart-${{ github.event.pull_request.head.sha || github.sha }}
+      cancel-in-progress: false
+    steps:
+      - name: Require complete image publication
+        env:
+          IMAGE_RESULT: ${{ needs.images.result }}
+        run: test "$IMAGE_RESULT" = success
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install uv==0.12.1
+      - run: uv sync --project apps/backend --frozen
+      - run: bash scripts/install-helm.sh
+      - run: uv run --project apps/backend --frozen python scripts/ci_release.py metadata
+      - name: Package or verify and reuse Chart, then read back
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BACKEND_DIGEST: ${{ needs.images.outputs.backend_digest }}
+          FRONTEND_DIGEST: ${{ needs.images.outputs.frontend_digest }}
+        run: uv run --project apps/backend --frozen python scripts/ci_release.py chart
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: release-${{ env.SOURCE_SHA }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .tools/release/release.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+      - name: Failure summary
+        if: ${{ failure() }}
+        run: echo 'Chart publication failed or was blocked. See job logs; no successful release artifact was uploaded.' >> "$GITHUB_STEP_SUMMARY"
