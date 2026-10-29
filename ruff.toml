@@ -1,0 +1,5 @@
+target-version = "py312"
+extend-exclude = ["node_modules", ".tools"]
+
+[lint]
+select = ["E4", "E7", "E9", "F"]

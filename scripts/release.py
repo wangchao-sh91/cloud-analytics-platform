@@ -160,7 +160,8 @@ def main():
             raise ValueError('Backup failed or is not a PostgreSQL custom archive')
         run(k + ['exec', '-i', pod, '--', 'pg_restore', '--list'], data=dump)
         dump_file = backup/'database.dump'
-        dump_file.write_bytes(dump); dump_file.chmod(0o600)
+        dump_file.write_bytes(dump)
+        dump_file.chmod(0o600)
         baseline = {'pvc_uid': claim['metadata']['uid'], 'secret_sha256': hashlib.sha256(json.dumps(secret['data'], sort_keys=True).encode()).hexdigest()}
         rows = run(k + ['exec', pod, '--', 'psql', '-U', identity['user'], '-d', identity['database'], '-At', '-c', "SELECT coalesce(json_agg(s ORDER BY id), '[]'::json) FROM physical_servers s"])
         baseline['assets'] = json.loads(rows)
