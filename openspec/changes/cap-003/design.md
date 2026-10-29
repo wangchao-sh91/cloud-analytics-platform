@@ -2,10 +2,10 @@
 
 动机及业务范围见 `proposal.md`，行为契约见 `specs/ci-artifact-publishing/spec.md`。
 
-- 当前没有 `.github/workflows/`。后端使用 Python 3.12、uv 锁文件与 pytest；前端使用 Node 22、npm 锁文件，build 包含 TypeScript 编译，但没有 lint 入口。
+- cap-003 既有实现使用单一 `.github/workflows/ci.yaml`，PR 与 main 都运行六个 Job；本次规划修订要求 PR 保留六项，main 仅运行两个发布 Job。后端使用 Python 3.12、uv 与 pytest，前端使用 Node 22、npm，已有本地静态检查入口。
 - 后端资产集成测试会迁移、清空测试表，必须显式提供独立 `TEST_DATABASE_URL`；不能使用既有部署库。
 - `scripts/tests/test_release.py` 是现有发布预检查逻辑的单元测试，使用 mock 验证资源归属冲突、数据库配置兼容性及备份失败时停止操作等安全边界，不连接数据库或 Kubernetes 集群，也不执行实际部署；`scripts/tests/test_chart.py` 通过 Helm 子进程验证 Chart。
-- Chart 当前版本为 `0.2.0`，默认前后端镜像为 kind 本地镜像；values 支持镜像 repository/tag。将发布配置写回源码会干扰本地工作流。
+- Chart 当前版本为 `0.3.0`，默认前后端镜像为 kind 本地镜像；values 支持镜像 repository/tag。将发布配置写回源码会干扰本地工作流。
 - 现有 Playwright 测试依赖运行中的应用，不属于本次无部署流水线。没有独立前端单元测试，不将类型检查重复计作前端单元测试成功。
 - cap-003 只生产制品；后续 Flux、PR 数据库重建、集群内 E2E、Checks 回报和手动清理在另一 change 中规划。
 - 维护者确认仓库层已限制 collaborators-only 提交 PR。本设计以该限制为前提，不在 Workflow 中重复实现来源分类或 Fork 专门路径。
@@ -14,7 +14,7 @@
 
 **Goals:**
 
-- 六条稳定的 PR 检查与准确的源 SHA 对应，PR 和 main 复用同一检查、发布路径。
+- 六条稳定的 PR 检查与准确的源 SHA 对应；main 仅保留两个发布 Job，PR/main 复用制品发布脚本。
 - 只使用标准 GitHub Linux Runner、临时 PostgreSQL 和 GHCR，运行前不需要集群或云账号准备。
 - 制品具有唯一版本、完整身份和机器可读输出，可被后续独立部署流程消费。
 - 检查、打包入口可以在本地复现；既有 kind/legacy 配置和数据保留语义不变。
@@ -28,9 +28,9 @@
 
 ## Decisions
 
-### 1. 一个入口 Workflow，六个稳定 Job
+### 1. 分离 PR 检查与 main 发布 Workflow
 
-新增 CI 入口，触发 `pull_request`（目标 main，opened/synchronize/reopened）和 `push`（main）。使用 `ubuntu-24.04` 标准 Runner；Job 对外名称与 proposal 中六个 Check 完全一致。前后端构建在同一 Job 的独立步骤执行，避免 matrix 将一项 Check 拆成不同名称。
+PR 入口保留 `.github/workflows/ci.yaml`，只触发目标 main 的 `pull_request`（opened/synchronize/reopened），定义六个稳定 Job：
 
 ```text
 Static Checks ───────┐
@@ -39,13 +39,21 @@ Helm Validation ─────┼──> Build and Publish Images ──> Packa
 Chart Version Check ┘
 ```
 
-四项质量门禁可并行。镜像、Chart Job 使用显式前置结果检查：上游失败或取消时不得因整个 Job 被条件跳过而呈现成功；下游门禁使用 `always()` 加前置结果判断，依赖失败就明确失败，不执行推送。所有进入流水线的 PR 使用同一检查与发布路径。
+main 入口单独放在 `.github/workflows/publish-main.yaml`，仅触发 main push，严格只定义两个 Job：
 
-PR 以来源仓库和 PR 编号设置 concurrency group，可取消被更新替代的旧运行；main 不配置会合并不同 push 的 concurrency group，也不取消旧发布，允许每次 push 独立运行。版本不使用浮动别名，因此并发/取消不会把某个旧提交重新指向 latest。main 当前只有制品发布，不需要按环境串行；实际部署的顺序在后续 change 设计。
+```text
+Build and Publish Images ──> Package and Publish Chart
+```
 
-不使用路径过滤，以免 PR 只修改文档时缺失 required checks。手动配置分支保护仍由维护者完成，Workflow 不修改仓库规则。
+两个入口使用 `ubuntu-24.04` 标准 Runner，复用 `scripts/ci_release.py` 的身份、版本、镜像、Chart 发布及读回逻辑，保持两个发布 Job 的对外名称一致。main 不执行静态检查、代码测试、独立 Helm 校验或 Chart bump 检查，也不通过 skipped Job 展示这些步骤。发布 Job 内仍做准确 checkout、源码/版本格式校验、镜像身份校验、发布副本 lint/template、打包与实际制品读回；这些属于发布验收，不是额外质量检查 Job。
 
-替代方案：为 PR/main 各复制一份 Workflow。放弃，原因是检查和版本逻辑容易漂移；如实现时需要复用 Workflow，必须保持 PR 最终 Check 名称稳定。
+PR 的四项质量门禁并行，镜像 Job 用 `always()` 和显式结果判断阻止 failure/skipped/cancelled 上游触发推送。main 的镜像 Job 无 PR 门禁依赖，直接从该次 push 的准确提交构建或复用制品。两个入口的 Chart Job 都只依赖各自的镜像 Job，用 `always()` 加结果检查使镜像失败时 Chart 明确失败，不发布成功清单。
+
+PR 以来源仓库和 PR 编号设置 concurrency group，可取消被更新替代的旧运行。main 不合并不同 push 的排队任务、不主动取消旧发布；镜像与 Chart 的同 SHA 发布锁继续生效。版本不使用浮动别名，实际部署顺序留给后续 change。
+
+不使用路径过滤，以免纯文档 PR 缺少 required checks。维护者在 main 合并规则中配置 PR 六项 required checks；main 的两个发布 Job 不替代合并前门禁。
+
+替代方案：在单一 Workflow 中为四个检查 Job 增加 PR 条件。未采用，因为 main 仍会显示四个 skipped Job，不能满足 main 只包含两个发布 Job 的要求。共享发布脚本避免两个入口的制品规则漂移；不创建会增加 main Job 数量的额外准备 Job。
 
 ### 2. 一次运行只读取一个源提交
 
@@ -61,7 +69,7 @@ PR 显式 checkout `pull_request.head.sha`，main checkout 事件中的 `github.
 
 变更分类采用保守规则：`docs/**`、`openspec/**`、根目录 `.md` 文档以及根目录 `LICENSE`/`LICENSE.*` 为纯文档豁免，其余改动均要求 bump，包括 `apps/**`（含源码、测试、依赖、Dockerfile）、`scripts/**`、`charts/**`、`.github/**` 和根目录构建配置。新增、删除、重命名均检查；跨目录重命名同时考虑旧路径和新路径，不能将代码移到文档目录来绕过检查。路径由 Git 的 NUL 分隔输出解析，支持空格等字符，不使用不安全的 shell 拆词。
 
-源码 version 首版限定为稳定 `MAJOR.MINOR.PATCH`，无前导零、prerelease 或 build metadata；按数值 SemVer 比较，head 必须严格大于 base。修改 appVersion 或仅依赖 CI 追加 hash 都不算 bump。仅文档 PR 的该 Check 成功并解释无需 bump，但仍执行其他检查及发布。同一个 PR 只需相对 base 提升版本，不要求每次追加 commit 都再次提升。main 运行不做 PR base/head 比较，该 Job 返回成功并解释不适用；仍校验源码版本格式，并使用合并后的 SHA 发布。
+源码 version 首版限定为稳定 `MAJOR.MINOR.PATCH`，无前导零、prerelease 或 build metadata；按数值 SemVer 比较，head 必须严格大于 base。修改 appVersion 或仅依赖 CI 追加 hash 都不算 bump。仅文档 PR 的该 Check 成功并解释无需 bump，但仍执行其他检查及发布。同一个 PR 只需相对 base 提升版本，不要求每次追加 commit 都再次提升。main 不定义或调用 Chart Version Check，也不做 PR base/head 比较；发布元数据生成过程仍校验源码版本格式，并使用合并后的 SHA 发布。本地检查工具的 push 模式可保留，但 main Workflow 不调用该独立检查入口。
 
 替代方案：将检查放入 Helm Validation。采用独立 Check，使维护者在 PR 上能直接识别未 bump 的原因，并单独设置 required check。
 
@@ -134,7 +142,7 @@ Chart 后缀使用 `-sha<hash>`，保证是合法的 SemVer prerelease 标识，
 
 ## Risks / Trade-offs
 
-- [PR 验证 head 而非合并预览] → 摘要明确 source SHA，仓库规则可要求及时更新分支；main 再次执行完整检查。
+- [PR 验证 head 而非合并预览] → 摘要明确 source SHA，仓库规则可要求及时更新分支；main 仅发布，质量保障依赖合并前 PR 门禁。
 - [SHA tag 在 Registry 层仍可被有权用户覆盖] → 工作流先核对已有制品且不复写，记录镜像及 Chart digest，后续消费者可据 digest 验证。
 - [运行 token 或 Package 授权不足] → 发布明确失败并说明所缺权限；不改变仓库准入规则、不引入专门的来源分流或高权限事件绕过。
 - [部分制品已推送但后续失败] → 不产出成功清单，版本与源 SHA 固定绑定，允许幂等重跑，不将残留对象视为可部署成功版本。
@@ -145,9 +153,9 @@ Chart 后缀使用 `-sha<hash>`，保证是合法的 SemVer prerelease 标识，
 ## Migration Plan
 
 1. 添加本地质量检查入口、锁文件和仅必要的源码修复，先本地运行现有测试及 Helm 校验。
-2. 添加 PR 改动检测、Chart bump 检查、SHA 元数据生成、临时 Chart 打包与校验入口，再接入六 Job CI。
+2. 复用现有 PR 改动检测、SHA 元数据生成和发布脚本，拆分六 Job PR Workflow 与两个 Job main Workflow，更新 Workflow 契约测试。
 3. 由 collaborator 提交测试 PR 验证六项成功，下载发布清单，按引用读取镜像及 Chart；执行代码未 bump/正确 bump/纯文档、失败门禁、权限不足报错与相同 SHA 幂等重跑验证。
-4. PR 合并后检查 main 发布结果，对照其合并后 SHA；验证无需云凭据、kubeconfig 或自托管 Runner。
+4. PR 合并后确认 main 运行只显示两个发布 Job，对照合并后 SHA 和制品读回结果；验证未运行四项 PR 检查或启动 PostgreSQL service，无需云凭据、kubeconfig 或自托管 Runner。
 5. 首次成功后由维护者配置六条 required checks，并按需要调整 Package 仓库访问权限、可见性；不自动修改这些账户设置。
 6. 回退时恢复上一版 Workflow/检查配置；已发布的唯一版本保留，不需要数据库迁移、集群回退或 main spec 直接修改。
 

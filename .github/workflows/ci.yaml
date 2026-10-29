@@ -1,21 +1,19 @@
-name: CI and Publish
+name: PR Checks and Publish
 
 on:
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened]
-  push:
-    branches: [main]
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ci-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 env:
-  SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+  SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
   UV_NO_PROGRESS: '1'
   KUBECONFIG: /dev/null
 
@@ -125,7 +123,7 @@ jobs:
       contents: read
       packages: write
     concurrency:
-      group: publish-images-${{ github.event.pull_request.head.sha || github.sha }}
+      group: publish-images-${{ github.event.pull_request.head.sha }}
       cancel-in-progress: false
     outputs:
       backend_digest: ${{ steps.publish.outputs.backend_digest }}
@@ -170,7 +168,7 @@ jobs:
       contents: read
       packages: write
     concurrency:
-      group: publish-chart-${{ github.event.pull_request.head.sha || github.sha }}
+      group: publish-chart-${{ github.event.pull_request.head.sha }}
       cancel-in-progress: false
     steps:
       - name: Require complete image publication

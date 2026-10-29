@@ -1,6 +1,6 @@
 # CI 发布准备清单
 
-当前 cap-003 的范围是 PR 六项检查及 main 自动发布镜像、Helm Chart 到 GHCR。部署、Flux、集群内 E2E、GitHub Checks 回报和手动环境清理在后续 change 实现。
+当前 cap-003 的范围是 PR 六项检查及发布，以及 main 仅通过两个 Job 自动发布镜像、Helm Chart 到 GHCR。两个入口分别为 `PR Checks and Publish` 和 `Publish Main`。部署、Flux、集群内 E2E、GitHub Checks 回报和手动环境清理在后续 change 实现。
 
 ## 本次必须准备
 
@@ -9,6 +9,7 @@
 3. 保持默认 token 权限为只读即可。Workflow 仅在镜像和 Chart 发布 Job 声明 `packages: write`；若组织策略限制 Package 写入，需由管理员允许。`GITHUB_TOKEN` 由 GitHub 自动提供，不手动创建 PAT 或保存云端密钥。
 4. 对本次代码改动，将 `charts/cap/Chart.yaml` version 提升到高于 PR base 的稳定版本。本 change 已提升为 `0.3.0`；若目标 main 后续采用相同或更高版本，合并前需再次提升。
 5. 提交 PR，查看 Static Checks、Code Tests、Helm Validation、Chart Version Check、Build and Publish Images、Package and Publish Chart 六项结果。发布逻辑和版本规则见 [CI 文档](ci-and-publishing.md)。
+6. PR 合并到 main 后，查看独立的 `Publish Main` 运行：只能包含 Build and Publish Images、Package and Publish Chart 两个 Job，不应出现四项跳过的质量检查或数据库 service。核对 release.json 中的源 SHA 为本次 main 实际提交，镜像 tag 等于该 SHA，Chart version 为源码 version 加 SHA 后缀。
 
 ## 首次发布后的 GHCR 设置
 

@@ -1,21 +1,37 @@
 # CI 检查与 GHCR 制品发布
 
-cap-003 为目标 main 的 PR，以及 main 分支 push 提供六条检查。使用 GitHub 标准 Linux Runner，无需 ACK、Flux、自托管 Runner、云端凭据或 kubeconfig；不执行部署、浏览器 E2E 或环境清理。仓库已由维护者限制 collaborators-only 提交 PR，Workflow 不增加 Fork 专门分流。
+cap-003 提供两个独立 Workflow：目标 main 的 PR 执行六项检查及发布，main push 仅执行两个发布 Job。使用 GitHub 标准 Linux Runner，无需 ACK、Flux、自托管 Runner、云端凭据或 kubeconfig；不执行部署、浏览器 E2E 或环境清理。仓库已由维护者限制 collaborators-only 提交 PR，Workflow 不增加 Fork 专门分流。
 
-## 六条检查
+## PR：六条检查
+
+入口为 `.github/workflows/ci.yaml`，Actions 中显示为 `PR Checks and Publish`，只由 PR 事件触发。
 
 | Check | 内容 |
 |---|---|
 | Static Checks | Ruff、前端 ESLint 和 TypeScript 类型检查 |
 | Code Tests | 无数据库凭据的 mock 单元测试、独立临时 PostgreSQL 17 上的后端测试 |
 | Helm Validation | Helm v3.19.0，Kubernetes 1.35.8 离线目标，默认/kind/legacy values lint/template 和 Chart 回归测试 |
-| Chart Version Check | PR 代码相关改动必须提升源码 Chart version；main 只校验版本格式 |
+| Chart Version Check | PR 代码相关改动必须提升源码 Chart version |
 | Build and Publish Images | 前四项通过后构建或复用 linux/amd64 前后端镜像，推送 GHCR |
 | Package and Publish Chart | 校验镜像、临时打包 Chart、推送 GHCR、读回验收并上传发布清单 |
 
 PR opened/synchronize/reopened 均触发。没有路径过滤，纯文档 PR 仍产生全部检查。质量门禁失败时，下游发布 Job 明确失败，不用 skipped 掩盖前置失败。若推送部分成功后失败，残留制品不视为完整发布，不生成成功清单。
 
-Code Tests 的 PostgreSQL service 只映射至 Runner 的回环地址，使用无密码 trust 认证；它是本次作业专用临时服务，不能作为长期数据库的配置示例。单元测试步骤不注入数据库连接变量，后端测试步骤显式连接该临时库；不加载部署环境 `.env`。
+## main：两个发布 Job
+
+入口为 `.github/workflows/publish-main.yaml`，Actions 中显示为 `Publish Main`，只由 main push（包括 PR 合并）触发，严格只定义：
+
+```text
+Build and Publish Images → Package and Publish Chart
+```
+
+main 从该次 push 的准确 SHA 直接构建或复用镜像，不依赖 PR 的四项质量门禁；不定义或运行静态检查、代码测试、独立 Helm 校验、Chart bump 检查，也不显示这四项的 skipped Job，不启动 PostgreSQL service。质量保障依赖合并前的 PR 门禁，建议通过分支规则控制 main 的合并条件。
+
+发布 Job 内仍校验 checkout/source SHA、版本格式、镜像来源/架构、Chart 镜像配置，并执行临时副本的 lint/template 和实际制品读回。main 镜像失败时，Chart Job 明确失败而不推送；只有完整制品验收通过才生成成功清单。两个入口复用 `scripts/ci_release.py`，同一 SHA 的版本、digest 和复用规则保持一致。
+
+## 测试环境与源码身份
+
+PR 的 Code Tests 中，PostgreSQL service 只映射至 Runner 的回环地址，使用无密码 trust 认证；它是本次作业专用临时服务，不能作为长期数据库的配置示例。单元测试步骤不注入数据库连接变量，后端测试步骤显式连接该临时库；不加载部署环境 `.env`。
 
 PR 检查和制品使用事件的完整 head SHA，不是 GitHub 默认的合并预览 SHA；这不表示已经测试与最新 main 的合并结果。main 使用 push 事件的实际提交 SHA，包括普通 merge、squash 或 rebase 后产生的最终提交。需要限制直接推送或要求 PR 跟上 main 时，在仓库 Rulesets 中配置。
 
@@ -86,7 +102,7 @@ bash scripts/test-postgres.sh
 bash scripts/install-helm.sh
 bash scripts/check-helm.sh
 bash scripts/install-actionlint.sh
-.tools/actionlint-v1.7.12 -shellcheck= -pyflakes= .github/workflows/ci.yaml
+.tools/actionlint-v1.7.12 -shellcheck= -pyflakes= .github/workflows/ci.yaml .github/workflows/publish-main.yaml
 ```
 
 actionlint 安装脚本下载官方固定版本并校验 SHA-256；在本地用它校验 Workflow 语法和 GitHub 表达式。此处禁用可选 shellcheck/pyflakes 集成，不影响 actionlint 自身检查；Python 静态检查由 Ruff 执行。
@@ -95,7 +111,7 @@ actionlint 安装脚本下载官方固定版本并校验 SHA-256；在本地用�
 
 ## 权限与故障排查
 
-- Workflow 默认只有 `contents: read`，仅两个发布 Job 添加 `packages: write`。不需要 PAT、`contents: write` 或云平台 Secret。
+- 两个 Workflow 默认都只有 `contents: read`，各自仅镜像和 Chart 发布 Job 添加 `packages: write`。不需要 PAT、`contents: write` 或云平台 Secret。
 - 首次推送自动创建 GHCR Package，不需要手动创建 namespace 或仓库。Package 可见性不会随源码仓库自动公开，Workflow 也不自动修改它。
 - HTTP 401/403：确认仓库 Actions 策略允许 Package 写权限；对已有 Package，在 Package settings 的 Manage Actions access 给本仓库写权限。collaborators-only 限制不会改变平台签发的 token 权限。
 - HTTP 429/5xx 或网络失败：本次发布失败，可重跑；不得把错误当作制品不存在而覆盖。
@@ -103,4 +119,4 @@ actionlint 安装脚本下载官方固定版本并校验 SHA-256；在本地用�
 - Chart Version Check 失败：相对准确 base 提升源码 version；不要添加 appVersion/hash 来绕过。如果历史缺失，先拉取完整历史。
 - 发布镜像失败后 Chart 检查失败是预期门禁行为，优先排查上游；没有成功 artifact 就不宣称完整发布成功。
 
-首次成功后，可在 main 分支规则中将上述六条名称设置为 required status checks。Runner 分钟数、缓存和 artifact 存储额度以当前 GitHub 账户用量页面为准。[GitHub Actions 计费文档](https://docs.github.com/en/billing/concepts/product-billing/github-actions)
+首次 PR 运行成功后，可在 main 分支合并规则中将 PR 六条名称设置为 required status checks；main 发布的两个 Job 不替代合并前检查。Runner 分钟数、缓存和 artifact 存储额度以当前 GitHub 账户用量页面为准。[GitHub Actions 计费文档](https://docs.github.com/en/billing/concepts/product-billing/github-actions)
